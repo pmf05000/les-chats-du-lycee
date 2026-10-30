@@ -1,0 +1,78 @@
+name: Creer un episode TikTok de chats
+on:
+  workflow_dispatch:
+    inputs:
+      episode:
+        description: 'auto = prochain épisode inédit; sinon numéro de 1 à 30'
+        required: false
+        default: 'auto'
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: chats-du-lycee-creation
+  cancel-in-progress: false
+jobs:
+  produire:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Recuperer le depot
+        uses: actions/checkout@v4
+      - name: Calculer le prochain episode jamais publie en Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          EPISODE_REQUESTED: ${{ inputs.episode }}
+        shell: bash
+        run: |
+          if [[ -z "$EPISODE_REQUESTED" || "$EPISODE_REQUESTED" == "auto" ]]; then
+            num=1
+            while gh release view "episode-$(printf '%02d' "$num")" >/dev/null 2>&1; do
+              num=$((num + 1))
+            done
+          else
+            if [[ ! "$EPISODE_REQUESTED" =~ ^[0-9]+$ ]]; then
+              echo "L'episode doit etre un entier ou auto"; exit 1
+            fi
+            num=$((10#$EPISODE_REQUESTED))
+          fi
+          if ((num < 1 || num > 30)); then
+            echo "Les 30 episodes sont finis. Preparer une saison 2 pour continuer."; exit 1
+          fi
+          ep=$(printf '%02d' "$num")
+          if gh release view "episode-$ep" >/dev/null 2>&1; then
+            echo "Episode $ep deja present dans Releases : aucun doublon."; exit 1
+          fi
+          echo "EPISODE_INPUT=$num" >> "$GITHUB_ENV"
+          echo "EPISODE_NO=$ep" >> "$GITHUB_ENV"
+          echo "Episode planifie : $ep"
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Installer les dependances et FFmpeg
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg fonts-dejavu-core >/dev/null
+      - name: Generer scenario IA, prompts LoreMotion, images IA et montage automatique
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: python produire_video.py
+      - name: Sauvegarder les resultats en archive Actions
+        uses: actions/upload-artifact@v4
+        with:
+          name: chats-du-lycee-${{ env.EPISODE_NO }}
+          path: output/
+          retention-days: 30
+      - name: Publier les fichiers de l episode dans Releases (PAS TikTok)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          gh release create "episode-${EPISODE_NO}" output/* \
+            --title "Les Chats du Lycee - Episode ${EPISODE_NO}" \
+            --notes "Video animee avec images photorealistes, voix et sous-titres. Six prompts pour LoreMotion sont inclus. Le montage en vrai video et la publication TikTok restent manuels."
